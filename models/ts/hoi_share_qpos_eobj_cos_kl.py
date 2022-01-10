@@ -49,7 +49,7 @@ class DETRHOI(nn.Module):
                     gt_q_mask[i, :] = False
                     continue
                 gt_obj_vec[0:len(item), i, :] = item[:, 0:512]
-                gt_sp_vec[0:len(item), i, :] = item[:, 512:]
+                gt_sp_vec[0:len(item), i, :] = item[:, 512:512+12]
                 gt_q_mask[i, 0:len(item)] = False
             # todo
             t_sp = torch.tanh(self.query_embed_sp(gt_sp_vec))
@@ -108,23 +108,17 @@ class DETRHOI(nn.Module):
     def _set_aux_loss(self, outputs_obj_class, outputs_verb_class, outputs_sub_coord, outputs_obj_coord,
                       outputs_gt_obj_class, outputs_gt_verb_class, outputs_gt_sub_coord, outputs_gt_obj_coord,
                       hs, hs_gt, att, att_gt):
-        ans1 = [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, 'pred_obj_boxes': d}
-                for a, b, c, d in zip(outputs_obj_class[0:self.begin_l], outputs_verb_class[0:self.begin_l],
-                                      outputs_sub_coord[0:self.begin_l], outputs_obj_coord[0:self.begin_l])]
-
-        ans2 = [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, 'pred_obj_boxes': d,
+        return [{'pred_obj_logits': a, 'pred_verb_logits': b, 'pred_sub_boxes': c, 'pred_obj_boxes': d,
                  'gt_obj_logits': a1, 'gt_verb_logits': b1, 'gt_sub_boxes': c1, 'gt_obj_boxes': d1,
                  'hs': h1, 'hs_gt': h2, 'att': att1, 'att_gt': att2}
                 for a, b, c, d, a1, b1, c1, d1, h1, h2, att1, att2 in
-                zip(outputs_obj_class[self.begin_l:-1], outputs_verb_class[self.begin_l:-1],
-                    outputs_sub_coord[self.begin_l:-1], outputs_obj_coord[self.begin_l:-1],
+                zip(outputs_obj_class[:-1], outputs_verb_class[:-1],
+                    outputs_sub_coord[:-1], outputs_obj_coord[:-1],
                     outputs_gt_obj_class[:-1], outputs_gt_verb_class[:-1],
                     outputs_gt_sub_coord[:-1], outputs_gt_obj_coord[:-1],
-                    hs[self.begin_l:-1], hs_gt[:-1],
-                    att[self.begin_l:-1], att_gt[:-1]
+                    hs[:-1], hs_gt[:-1],
+                    att[:-1], att_gt[:-1]
                     )]
-        ans1.extend(ans2)
-        return ans1
 
 
 class MLP(nn.Module):
@@ -449,7 +443,7 @@ class PostProcessHOI(nn.Module):
         self.subject_category_id = subject_category_id
 
     @torch.no_grad()
-    def forward(self, outputs, target_sizes, ids):
+    def forward(self, outputs, target_sizes):
         out_obj_logits, out_verb_logits, out_sub_boxes, out_obj_boxes = outputs['pred_obj_logits'], \
                                                                         outputs['pred_verb_logits'], \
                                                                         outputs['pred_sub_boxes'], \
@@ -471,17 +465,16 @@ class PostProcessHOI(nn.Module):
         obj_boxes = obj_boxes * scale_fct[:, None, :]
 
         results = []
-        for os, ol, vs, sb, ob, id in zip(obj_scores, obj_labels, verb_scores, sub_boxes, obj_boxes, ids):
+        for os, ol, vs, sb, ob in zip(obj_scores, obj_labels, verb_scores, sub_boxes, obj_boxes):
             sl = torch.full_like(ol, self.subject_category_id)
             l = torch.cat((sl, ol))
             b = torch.cat((sb, ob))
             results.append({'labels': l.to('cpu').numpy(), 'boxes': b.to('cpu').numpy(), "image_id": id})
             vs = vs * os.unsqueeze(1)
             ids = torch.arange(b.shape[0])
-            results[-1].update({'verb_scores': vs.to('cpu').numpy(),
-                                'sub_ids': ids[:ids.shape[0] // 2].numpy(),
-                                'obj_ids': ids[ids.shape[0] // 2:].numpy()})
 
+            results[-1].update({'verb_scores': vs.to('cpu'), 'sub_ids': ids[:ids.shape[0] // 2],
+                                'obj_ids': ids[ids.shape[0] // 2:]})
         return results
 
 
