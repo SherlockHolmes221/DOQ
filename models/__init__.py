@@ -5,8 +5,10 @@
 # Modified from DETR (https://github.com/facebookresearch/detr)
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 # ------------------------------------------------------------------------
-from .detr import build
-
 
 def build_model(args):
+    if args.model_name == "hoi_ts":
+        from models.ts.hoi_share_qpos_eobj_cos_kl import build
+    else:
+        from models.detr import build
     return build(args)
