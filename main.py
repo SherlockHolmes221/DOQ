@@ -126,6 +126,7 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+    parser.add_argument('--model_name', default='baseline')
     return parser
 
 
@@ -210,11 +211,46 @@ def main(args):
             args.start_epoch = checkpoint['epoch'] + 1
     elif args.pretrained:
         checkpoint = torch.load(args.pretrained, map_location='cpu')
+
+        ##############################################################################
+        # model_path = "/home/xian/.cache/clip/ViT-B-16.pt"
+        # clip_model = torch.jit.load(model_path, map_location='cpu').eval()
+        # # clip_model = torch.load(model_path, map_location='cpu')
+        # # Copy the pretrained CLIP parameters as the initilized weights for our newly added modules.
+        # state_dict = clip_model.state_dict()
+        # new_state_dict = {}
+        # for n, p in clip_model.named_parameters():
+        #     if "visual" not in n:
+        #         if "transformer" in n:
+        #             new_state_dict.update({n.replace("transformer", "transformer_clip"): state_dict[n].clone()})
+        #         else:
+        #             new_state_dict.update({n: state_dict[n].clone()})
+        # checkpoint["model"].update(new_state_dict)
+        ###############################################################################
         model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+        model_dict = {}
+        for k, v in model_without_ddp.named_parameters():
+            model_dict[k] = v
+
+        for k in checkpoint['model']:
+            if k in model_dict:
+                if checkpoint['model'][k].shape != model_dict[k].shape:
+                    print('Skip loading parameter {}, required shape{}, ' \
+                          'loaded shape{}.'.format(
+                        k, model_dict[k].shape, checkpoint['model'][k].shape))
+                    checkpoint['model'][k] = model_dict[k]
+                # else:
+                #     print('load parameter {}.'.format(k))
+            else:
+                print('Drop parameter {}.'.format(k))
+        for k in model_dict:
+            if not (k in checkpoint['model']):
+                print('No param {}.'.format(k))
 
     if args.eval:
         if args.hoi:
-            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device)
+            evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val,
+                         args.subject_category_id, device)
             return
         else:
             test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
@@ -230,7 +266,7 @@ def main(args):
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm)
+            args.clip_max_norm, args.model_name)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -247,8 +283,18 @@ def main(args):
                 }, checkpoint_path)
 
         if args.hoi:
-            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val, args.subject_category_id, device)
-            coco_evaluator = None
+            test_stats = evaluate_hoi(args.dataset_file, model, postprocessors, data_loader_val,
+                                      args.subject_category_id, device)
+
+            if 'mAP' in test_stats and float(test_stats["mAP"]) > 0.27:
+                utils.save_on_master({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                }, output_dir / f'checkpoint{epoch:04}.pth')
+
         else:
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
@@ -262,17 +308,6 @@ def main(args):
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
-
-            # for evaluation logs
-            if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
-                if "bbox" in coco_evaluator.coco_eval:
-                    filenames = ['latest.pth']
-                    if epoch % 50 == 0:
-                        filenames.append(f'{epoch:03}.pth')
-                    for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
