@@ -469,7 +469,7 @@ class PostProcessHOI(nn.Module):
             sl = torch.full_like(ol, self.subject_category_id)
             l = torch.cat((sl, ol))
             b = torch.cat((sb, ob))
-            results.append({'labels': l.to('cpu').numpy(), 'boxes': b.to('cpu').numpy(), "image_id": id})
+            results.append({'labels': l.to('cpu'), 'boxes': b.to('cpu')})
             vs = vs * os.unsqueeze(1)
             ids = torch.arange(b.shape[0])
 
