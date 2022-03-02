@@ -42,6 +42,7 @@ qpic
  |       |   |─ vcoco_test.json
  |       |   |─ instances_vcoco_all_2014.json
  |       |   |─ sim_index_vcoco.pickle
+ |       |   |─ vcoco_clip.npy
  |       |   └─ vcoco_test.ids
  |       |─ images
  |       |   |─ train2014
@@ -51,6 +52,7 @@ qpic
  |       |─ annotations
  |       |   |─ test_2019.json
  |       |   |─ train_2019.json
+ |       |   |─ obj_clip.npy
  |       |   |─ sim_index_hoia.pickle
  |       |   └─ corre_hoia.npy
  |       |─ images
@@ -93,8 +95,9 @@ main.py \
 
 For the V-COCO training.
 ```
-python -m torch.distributed.launch \
---nproc_per_node=8 \
+CUDA_VISIBLE_DEVICES=5 python -m torch.distributed.launch \
+--nproc_per_node=1 \
+--master_port 1234567 \
 --use_env \
 main.py \
 --pretrained params/detr-r50-pre-vcoco.pth \

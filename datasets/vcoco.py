@@ -9,9 +9,9 @@ import numpy as np
 import pickle
 import torch
 import torch.utils.data
-import torchvision
 import datasets.transforms as T
-from util.stitch_images import get_replace_image, get_sim_index
+from datasets.stitch_images import get_replace_image, get_sim_index
+
 
 class VCOCO(torch.utils.data.Dataset):
 
@@ -38,7 +38,7 @@ class VCOCO(torch.utils.data.Dataset):
 
         self.nohoi_index = []
         self.sim_index = []
-        self.obj_embed = np.load('data/vcoco_clip.npy')
+        self.obj_embed = np.load('data/v-coco/annotations/vcoco_clip.npy')
 
     def __len__(self):
         return len(self.annotations)
@@ -53,7 +53,6 @@ class VCOCO(torch.utils.data.Dataset):
             img_anno = self.annotations[idx]
             img = Image.open(self.img_folder / img_anno['file_name']).convert('RGB')
 
-
         w, h = img.size
 
         if self.img_set == 'train' and len(img_anno['annotations']) > self.num_queries:
@@ -65,7 +64,8 @@ class VCOCO(torch.utils.data.Dataset):
 
         if self.img_set == 'train':
             # Add index for confirming which boxes are kept after image transformation
-            classes = [(i, self._valid_obj_ids.index(obj['category_id'])) for i, obj in enumerate(img_anno['annotations'])]
+            classes = [(i, self._valid_obj_ids.index(obj['category_id'])) for i, obj in
+                       enumerate(img_anno['annotations'])]
         else:
             classes = [self._valid_obj_ids.index(obj['category_id']) for obj in img_anno['annotations']]
         classes = torch.tensor(classes, dtype=torch.int64)
@@ -99,7 +99,7 @@ class VCOCO(torch.utils.data.Dataset):
 
             for hoi in img_anno['hoi_annotation']:
                 if hoi['subject_id'] not in kept_box_indices or \
-                   (hoi['object_id'] != -1 and hoi['object_id'] not in kept_box_indices):
+                        (hoi['object_id'] != -1 and hoi['object_id'] not in kept_box_indices):
                     continue
                 sub_obj_pair = (hoi['subject_id'], hoi['object_id'])
                 if sub_obj_pair in sub_obj_pairs:
@@ -162,22 +162,20 @@ class VCOCO(torch.utils.data.Dataset):
     def get_nohoi_index(self):
         nohoi_index = []
         for i in range(len(self.annotations)):
-            if(len(self.annotations[i]['hoi_annotation'])==0):
+            if (len(self.annotations[i]['hoi_annotation']) == 0):
                 nohoi_index.append(i)
             else:
                 obj_id = [v['object_id'] for v in self.annotations[i]['hoi_annotation']]
-                if(sum(obj_id)== -len(obj_id)):
+                if (sum(obj_id) == -len(obj_id)):
                     nohoi_index.append(i)
         self.nohoi_index = nohoi_index
 
     def get_sim_index(self):
-        self.sim_index = pickle.load(open('datasets/sim_index_vcoco.pickle', 'rb'))
-
+        self.sim_index = pickle.load(open('data/v-coco/annotations/sim_index_vcoco.pickle', 'rb'))
 
 
 # Add color jitter to coco transforms
 def make_vcoco_transforms(image_set):
-
     normalize = T.Compose([
         T.ToTensor(),
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
