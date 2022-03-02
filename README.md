@@ -14,7 +14,7 @@ The paper is accepted to CVPR2022.
 ## Preparation
 
 ### Environment
-Our implementation uses environment the same as [QPIC](),
+Our implementation uses environment the same as [QPIC](https://github.com/hitachi-rd-cv/qpic),
 please follow QPIC to set up pytorch environment.
 
 ### Dataset
@@ -58,14 +58,14 @@ qpic
  |       |   └─ trainval
 ```
 
-The annotations file can be downloaded [here]()
-The pre-trained weights can be downloaded [here]()
+The annotations file,
+pre-trained weights and 
+trained parameters can be downloaded [here](https://drive.google.com/drive/folders/1dVaHxMbSIwStARIMH_kDbosA5ZDi84Rj?usp=sharing)
 
 Please download the images at the official website for the datasets above.
 
 
 ### Trained parameters
-The trained parameters are available [here]().
 
 ## Training
 After the preparation, you can start the training with the following command.
@@ -227,3 +227,6 @@ booktitle={CVPR},
 year = {2022},
 }
 ```
+
+## Acknowledgement
+[QPIC](https://github.com/hitachi-rd-cv/qpic)
