@@ -3,136 +3,391 @@
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
 import argparse
-from pathlib import Path
 import numpy as np
-import copy
 import pickle
 
 import torch
-from torch import nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from datasets.vcoco import build as build_dataset
 from models.backbone import build_backbone
-from models.transformer import build_transformer
 import util.misc as utils
-from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
-from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
-                       accuracy, get_world_size, interpolate,
-                       is_dist_avail_and_initialized)
+import json
+from pycocotools.coco import COCO
+from tqdm import tqdm
+import copy
 
 
-class DETRHOI(nn.Module):
+class VCOCOeval(object):
 
-    def __init__(self, backbone, transformer, num_obj_classes, num_verb_classes, num_queries):
-        super().__init__()
-        self.num_queries = num_queries
-        self.transformer = transformer
-        hidden_dim = transformer.d_model
-        self.query_embed = nn.Embedding(num_queries, hidden_dim)
-        self.obj_class_embed = nn.Linear(hidden_dim, num_obj_classes + 1)
-        self.verb_class_embed = nn.Linear(hidden_dim, num_verb_classes)
-        self.sub_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-        self.obj_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-        self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
-        self.backbone = backbone
+    def __init__(self, vsrl_annot_file, coco_annot_file,
+                 split_file):
+        """Input:
+        vslr_annot_file: path to the vcoco annotations
+        coco_annot_file: path to the coco annotations
+        split_file: image ids for split
+        """
+        self.COCO = COCO(coco_annot_file)
+        self.VCOCO = _load_vcoco(vsrl_annot_file)
+        self.image_ids = np.loadtxt(open(split_file, 'r'))
+        # simple check
+        assert np.all(np.equal(np.sort(np.unique(self.VCOCO[0]['image_id'])), self.image_ids))
 
-    def forward(self, samples: NestedTensor):
-        if not isinstance(samples, NestedTensor):
-            samples = nested_tensor_from_tensor_list(samples)
-        features, pos = self.backbone(samples)
+        self._init_coco()
+        self._init_vcoco()
 
-        src, mask = features[-1].decompose()
-        assert mask is not None
-        hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
+    def _init_vcoco(self):
+        actions = [x['action_name'] for x in self.VCOCO]
+        roles = [x['role_name'] for x in self.VCOCO]
+        self.actions = actions
+        self.actions_to_id_map = {v: i for i, v in enumerate(self.actions)}
+        self.num_actions = len(self.actions)
+        self.roles = roles
 
-        outputs_obj_class = self.obj_class_embed(hs)
-        outputs_verb_class = self.verb_class_embed(hs)
-        outputs_sub_coord = self.sub_bbox_embed(hs).sigmoid()
-        outputs_obj_coord = self.obj_bbox_embed(hs).sigmoid()
-        out = {'pred_obj_logits': outputs_obj_class[-1], 'pred_verb_logits': outputs_verb_class[-1],
-               'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
-        return out
+    def _init_coco(self):
+        category_ids = self.COCO.getCatIds()
+        categories = [c['name'] for c in self.COCO.loadCats(category_ids)]
+        self.category_to_id_map = dict(zip(categories, category_ids))
+        self.classes = ['__background__'] + categories
+        self.num_classes = len(self.classes)
+        self.json_category_id_to_contiguous_id = {
+            v: i + 1 for i, v in enumerate(self.COCO.getCatIds())}
+        self.contiguous_category_id_to_json_id = {
+            v: k for k, v in self.json_category_id_to_contiguous_id.items()}
+
+    def _get_vcocodb(self):
+        vcocodb = copy.deepcopy(self.COCO.loadImgs(self.image_ids.tolist()))
+        for entry in vcocodb:
+            self._prep_vcocodb_entry(entry)
+            self._add_gt_annotations(entry)
+
+        return vcocodb
+
+    def _prep_vcocodb_entry(self, entry):
+        entry['boxes'] = np.empty((0, 4), dtype=np.float32)
+        entry['is_crowd'] = np.empty((0), dtype=np.bool)
+        entry['gt_classes'] = np.empty((0), dtype=np.int32)
+        entry['gt_actions'] = np.empty((0, self.num_actions), dtype=np.int32)
+        entry['gt_role_id'] = np.empty((0, self.num_actions, 2), dtype=np.int32)
+
+    def _add_gt_annotations(self, entry):
+        ann_ids = self.COCO.getAnnIds(imgIds=entry['id'], iscrowd=None)
+        objs = self.COCO.loadAnns(ann_ids)
+        # Sanitize bboxes -- some are invalid
+        valid_objs = []
+        valid_ann_ids = []
+        width = entry['width']
+        height = entry['height']
+        for i, obj in enumerate(objs):
+            if 'ignore' in obj and obj['ignore'] == 1:
+                continue
+            # Convert form x1, y1, w, h to x1, y1, x2, y2
+            x1 = obj['bbox'][0]
+            y1 = obj['bbox'][1]
+            x2 = x1 + np.maximum(0., obj['bbox'][2] - 1.)
+            y2 = y1 + np.maximum(0., obj['bbox'][3] - 1.)
+            x1, y1, x2, y2 = clip_xyxy_to_image(
+                x1, y1, x2, y2, height, width)
+            # Require non-zero seg area and more than 1x1 box size
+            if obj['area'] > 0 and x2 > x1 and y2 > y1:
+                obj['clean_bbox'] = [x1, y1, x2, y2]
+                valid_objs.append(obj)
+                valid_ann_ids.append(ann_ids[i])
+        num_valid_objs = len(valid_objs)
+        assert num_valid_objs == len(valid_ann_ids)
+
+        boxes = np.zeros((num_valid_objs, 4), dtype=entry['boxes'].dtype)
+        is_crowd = np.zeros((num_valid_objs), dtype=entry['is_crowd'].dtype)
+        gt_classes = np.zeros((num_valid_objs), dtype=entry['gt_classes'].dtype)
+        gt_actions = -np.ones((num_valid_objs, self.num_actions), dtype=entry['gt_actions'].dtype)
+        gt_role_id = -np.ones((num_valid_objs, self.num_actions, 2), dtype=entry['gt_role_id'].dtype)
+
+        for ix, obj in enumerate(valid_objs):
+            cls = self.json_category_id_to_contiguous_id[obj['category_id']]
+            boxes[ix, :] = obj['clean_bbox']
+            gt_classes[ix] = cls
+            is_crowd[ix] = obj['iscrowd']
+
+            gt_actions[ix, :], gt_role_id[ix, :, :] = \
+                self._get_vsrl_data(valid_ann_ids[ix],
+                                    valid_ann_ids, valid_objs)
+
+        entry['boxes'] = np.append(entry['boxes'], boxes, axis=0)
+        entry['gt_classes'] = np.append(entry['gt_classes'], gt_classes)
+        entry['is_crowd'] = np.append(entry['is_crowd'], is_crowd)
+        entry['gt_actions'] = np.append(entry['gt_actions'], gt_actions, axis=0)
+        entry['gt_role_id'] = np.append(entry['gt_role_id'], gt_role_id, axis=0)
+
+    def _get_vsrl_data(self, ann_id, ann_ids, objs):
+        """ Get VSRL data for ann_id."""
+        action_id = -np.ones((self.num_actions), dtype=np.int32)
+        role_id = -np.ones((self.num_actions, 2), dtype=np.int32)
+        # check if ann_id in vcoco annotations
+        in_vcoco = np.where(self.VCOCO[0]['ann_id'] == ann_id)[0]
+        if in_vcoco.size > 0:
+            action_id[:] = 0
+            role_id[:] = -1
+        else:
+            return action_id, role_id
+        for i, x in enumerate(self.VCOCO):
+            assert x['action_name'] == self.actions[i]
+            has_label = np.where(np.logical_and(x['ann_id'] == ann_id, x['label'] == 1))[0]
+            if has_label.size > 0:
+                action_id[i] = 1
+                assert has_label.size == 1
+                rids = x['role_object_id'][has_label]
+                assert rids[0, 0] == ann_id
+                for j in range(1, rids.shape[1]):
+                    if rids[0, j] == 0:
+                        # no role
+                        continue
+                    aid = np.where(ann_ids == rids[0, j])[0]
+                    assert aid.size > 0
+                    role_id[i, j - 1] = aid
+        return action_id, role_id
+
+    def _collect_detections_for_image(self, dets, image_id):
+
+        agents = np.empty((0, 4 + self.num_actions), dtype=np.float32)  # 4 + 26 = 30
+        roles = np.empty((0, 5 * self.num_actions, 2), dtype=np.float32)  # (5 * 26), 2
+        for det in dets:  # loop all detection instance
+            if str(det['image_id']) == str(image_id):  # might be several
+                this_agent = np.zeros((1, 4 + self.num_actions), dtype=np.float32)
+                this_role = np.zeros((1, 5 * self.num_actions, 2), dtype=np.float32)
+                this_agent[0, :4] = det['person_box']
+                for aid in range(self.num_actions):  # loop 26 actions
+                    for j, rid in enumerate(self.roles[aid]):
+                        if rid == 'agent':
+                            # if aid == 10:
+                            #  this_agent[0, 4 + aid] = det['talk_' + rid]
+                            # if aid == 16:
+                            #  this_agent[0, 4 + aid] = det['work_' + rid]
+                            # if (aid != 10) and (aid != 16):
+                            # print(det[self.actions[aid] + '_' + rid])
+                            key = self.actions[aid] + '_' + rid
+                            if key in det:
+                                this_agent[0, 4 + aid] = det[key]
+                            else:
+                                this_agent[0, 4 + aid] = np.nan
+                        else:
+                            key = self.actions[aid] + '_' + rid
+                            if key in det:
+                                this_role[0, 5 * aid: 5 * aid + 5, j - 1] = det[key]
+                            else:
+                                this_role[0, 5 * aid: 5 * aid + 5, j - 1] = [np.nan, np.nan, np.nan, np.nan, np.nan]
+                agents = np.concatenate((agents, this_agent), axis=0)
+                roles = np.concatenate((roles, this_role), axis=0)
+        return agents, roles
+
+    def _do_eval(self, detections_file, ovr_thresh=0.5, out_name=None):
+        vcocodb = self._get_vcocodb()
+        self._do_role_eval(vcocodb, detections_file, out_name, ovr_thresh=ovr_thresh, eval_type='scenario_1')
+
+    def _do_role_eval(self, vcocodb, dets, output_txt, ovr_thresh=0.5, eval_type='scenario_1'):
+        tp = [[[] for r in range(2)] for a in range(self.num_actions)]
+        fp = [[[] for r in range(2)] for a in range(self.num_actions)]
+        sc = [[[] for r in range(2)] for a in range(self.num_actions)]
+
+        npos = np.zeros((self.num_actions), dtype=np.float32)
+
+        for i in tqdm(range(len(vcocodb))):
+            image_id = vcocodb[i]['id']
+            gt_inds = np.where(vcocodb[i]['gt_classes'] == 1)[0]
+            # person boxes
+            gt_boxes = vcocodb[i]['boxes'][gt_inds]
+            gt_actions = vcocodb[i]['gt_actions'][gt_inds]
+            # some peorson instances don't have annotated actions
+            # we ignore those instances
+            ignore = np.any(gt_actions == -1, axis=1)
+            assert np.all(gt_actions[np.where(ignore == True)[0]] == -1)
+
+            for aid in range(self.num_actions):
+                npos[aid] += np.sum(gt_actions[:, aid] == 1)
+
+            pred_agents, pred_roles = self._collect_detections_for_image(dets, image_id)
+
+            for aid in range(self.num_actions):
+                if len(self.roles[aid]) < 2:
+                    # if action has no role, then no role AP computed
+                    continue
+
+                for rid in range(len(self.roles[aid]) - 1):
+
+                    # keep track of detected instances for each action for each role
+                    covered = np.zeros((gt_boxes.shape[0]), dtype=np.bool)
+
+                    # get gt roles for action and role
+                    gt_role_inds = vcocodb[i]['gt_role_id'][gt_inds, aid, rid]
+                    gt_roles = -np.ones_like(gt_boxes)
+                    for j in range(gt_boxes.shape[0]):
+                        if gt_role_inds[j] > -1:
+                            gt_roles[j] = vcocodb[i]['boxes'][gt_role_inds[j]]
+
+                    agent_boxes = pred_agents[:, :4]
+                    role_boxes = pred_roles[:, 5 * aid: 5 * aid + 4, rid]
+                    agent_scores = pred_roles[:, 5 * aid + 4, rid]
+
+                    valid = np.where(np.isnan(agent_scores) == False)[0]
+                    agent_scores = agent_scores[valid]
+                    agent_boxes = agent_boxes[valid, :]
+                    role_boxes = role_boxes[valid, :]
+
+                    idx = agent_scores.argsort()[::-1]
+
+                    for j in idx:
+                        pred_box = agent_boxes[j, :]
+                        overlaps = get_overlap(gt_boxes, pred_box)
+
+                        # matching happens based on the person
+                        jmax = overlaps.argmax()
+                        ovmax = overlaps.max()
+
+                        # if matched with an instance with no annotations
+                        # continue
+                        if ignore[jmax]:
+                            continue
+
+                        # overlap between predicted role and gt role
+                        if np.all(gt_roles[jmax, :] == -1):  # if no gt role
+                            if eval_type == 'scenario_1':
+                                if np.all(role_boxes[j, :] == 0.0) or np.all(np.isnan(role_boxes[j, :])):
+                                    # if no role is predicted, mark it as correct role overlap
+                                    ov_role = 1.0
+                                else:
+                                    # if a role is predicted, mark it as false
+                                    ov_role = 0.0
+                            elif eval_type == 'scenario_2':
+                                # if no gt role, role prediction is always correct, irrespective of the actual predition
+                                ov_role = 1.0
+                            else:
+                                raise ValueError('Unknown eval type')
+                        else:
+                            ov_role = get_overlap(gt_roles[jmax, :].reshape((1, 4)), role_boxes[j, :])
+
+                        is_true_action = (gt_actions[jmax, aid] == 1)
+                        sc[aid][rid].append(agent_scores[j])
+                        if is_true_action and (ovmax >= ovr_thresh) and (ov_role >= ovr_thresh):
+                            if covered[jmax]:
+                                fp[aid][rid].append(1)
+                                tp[aid][rid].append(0)
+                            else:
+                                fp[aid][rid].append(0)
+                                tp[aid][rid].append(1)
+                                covered[jmax] = True
+                        else:
+                            fp[aid][rid].append(1)
+                            tp[aid][rid].append(0)
+
+        # compute ap for each action
+        role_ap = np.zeros((self.num_actions, 2), dtype=np.float32)
+        role_ap[:] = np.nan
+        for aid in range(self.num_actions):
+            if len(self.roles[aid]) < 2:
+                continue
+            for rid in range(len(self.roles[aid]) - 1):
+                a_fp = np.array(fp[aid][rid], dtype=np.float32)
+                a_tp = np.array(tp[aid][rid], dtype=np.float32)
+                a_sc = np.array(sc[aid][rid], dtype=np.float32)
+                # sort in descending score order
+                idx = a_sc.argsort()[::-1]
+                a_fp = a_fp[idx]
+                a_tp = a_tp[idx]
+                a_sc = a_sc[idx]
+
+                a_fp = np.cumsum(a_fp)
+                a_tp = np.cumsum(a_tp)
+                rec = a_tp / float(npos[aid])
+                # check
+                assert (np.amax(rec) <= 1)
+                prec = a_tp / np.maximum(a_tp + a_fp, np.finfo(np.float64).eps)
+                role_ap[aid, rid] = voc_ap(rec, prec)
+
+        f = open(output_txt, 'a')
+        print('---------Reporting Role AP (%)------------------')
+        f.write('---------Reporting Role AP (%)------------------\n')
+        for aid in range(self.num_actions):
+            if len(self.roles[aid]) < 2: continue
+            for rid in range(len(self.roles[aid]) - 1):
+                info = '{: >23}: AP = {:0.2f} (#pos = {:d})'.format(self.actions[aid] + '-' + self.roles[aid][rid + 1],
+                                                                    role_ap[aid, rid] * 100.0, int(npos[aid]))
+                print(info)
+                f.write(info)
+                f.write('\n')
+        info = 'Average Role [%s] AP = %.2f' % (eval_type, np.nanmean(role_ap) * 100.00)
+        print(info)
+        f.write(info)
+        f.write('\n')
+        print('---------------------------------------------')
+        f.write('---------------------------------------------\n')
+        info = 'Average Role [%s] AP = %.2f, omitting the action "point"' % (
+            eval_type, (np.nanmean(role_ap) * 25 - role_ap[-3][0]) / 24 * 100.00)
+        print(info)
+        f.write(info)
+        f.write('\n')
+        print('---------------------------------------------')
+        f.write('---------------------------------------------\n')
+        f.close()
 
 
-class MLP(nn.Module):
-    """ Very simple multi-layer perceptron (also called FFN)"""
-
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
-        super().__init__()
-        self.num_layers = num_layers
-        h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
-
-    def forward(self, x):
-        for i, layer in enumerate(self.layers):
-            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
-        return x
+def _load_vcoco(vcoco_file):
+    print('loading vcoco annotations...')
+    with open(vcoco_file, 'r') as f:
+        vsrl_data = json.load(f)
+    for i in range(len(vsrl_data)):
+        vsrl_data[i]['role_object_id'] = \
+            np.array(vsrl_data[i]['role_object_id']).reshape((len(vsrl_data[i]['role_name']), -1)).T
+        for j in ['ann_id', 'label', 'image_id']:
+            vsrl_data[i][j] = np.array(vsrl_data[i][j]).reshape((-1, 1))
+    return vsrl_data
 
 
-class PostProcessHOI(nn.Module):
+def clip_xyxy_to_image(x1, y1, x2, y2, height, width):
+    x1 = np.minimum(width - 1., np.maximum(0., x1))
+    y1 = np.minimum(height - 1., np.maximum(0., y1))
+    x2 = np.minimum(width - 1., np.maximum(0., x2))
+    y2 = np.minimum(height - 1., np.maximum(0., y2))
+    return x1, y1, x2, y2
 
-    def __init__(self, num_queries, subject_category_id, correct_mat):
-        super().__init__()
-        self.max_hois = 100
 
-        self.num_queries = num_queries
-        self.subject_category_id = subject_category_id
+def get_overlap(boxes, ref_box):
+    ixmin = np.maximum(boxes[:, 0], ref_box[0])
+    iymin = np.maximum(boxes[:, 1], ref_box[1])
+    ixmax = np.minimum(boxes[:, 2], ref_box[2])
+    iymax = np.minimum(boxes[:, 3], ref_box[3])
+    iw = np.maximum(ixmax - ixmin + 1., 0.)
+    ih = np.maximum(iymax - iymin + 1., 0.)
+    inters = iw * ih
 
-        correct_mat = np.concatenate((correct_mat, np.ones((correct_mat.shape[0], 1))), axis=1)
-        self.register_buffer('correct_mat', torch.from_numpy(correct_mat))
+    # union
+    uni = ((ref_box[2] - ref_box[0] + 1.) * (ref_box[3] - ref_box[1] + 1.) +
+           (boxes[:, 2] - boxes[:, 0] + 1.) *
+           (boxes[:, 3] - boxes[:, 1] + 1.) - inters)
 
-    @torch.no_grad()
-    def forward(self, outputs, target_sizes):
-        out_obj_logits, out_verb_logits, out_sub_boxes, out_obj_boxes = outputs['pred_obj_logits'], \
-                                                                        outputs['pred_verb_logits'], \
-                                                                        outputs['pred_sub_boxes'], \
-                                                                        outputs['pred_obj_boxes']
+    overlaps = inters / uni
+    return overlaps
 
-        assert len(out_obj_logits) == len(target_sizes)
-        assert target_sizes.shape[1] == 2
 
-        obj_prob = F.softmax(out_obj_logits, -1)
-        obj_scores, obj_labels = obj_prob[..., :-1].max(-1)
+def voc_ap(rec, prec):
+    """ ap = voc_ap(rec, prec)
+    Compute VOC AP given precision and recall.
+    [as defined in PASCAL VOC]
+    """
+    # correct AP calculation
+    # first append sentinel values at the end
+    mrec = np.concatenate(([0.], rec, [1.]))
+    mpre = np.concatenate(([0.], prec, [0.]))
 
-        verb_scores = out_verb_logits.sigmoid()
+    # compute the precision envelope
+    for i in range(mpre.size - 1, 0, -1):
+        mpre[i - 1] = np.maximum(mpre[i - 1], mpre[i])
 
-        img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1).to(verb_scores.device)
-        sub_boxes = box_cxcywh_to_xyxy(out_sub_boxes)
-        sub_boxes = sub_boxes * scale_fct[:, None, :]
-        obj_boxes = box_cxcywh_to_xyxy(out_obj_boxes)
-        obj_boxes = obj_boxes * scale_fct[:, None, :]
+    # to calculate area under PR curve, look for points
+    # where X axis (recall) changes value
+    i = np.where(mrec[1:] != mrec[:-1])[0]
 
-        results = []
-        for os, ol, vs, sb, ob in zip(obj_scores, obj_labels, verb_scores, sub_boxes, obj_boxes):
-            sl = torch.full_like(ol, self.subject_category_id)
-            l = torch.cat((sl, ol))
-            b = torch.cat((sb, ob))
-            bboxes = [{'bbox': bbox, 'category_id': label} for bbox, label in zip(b.to('cpu').numpy(), l.to('cpu').numpy())]
-
-            hoi_scores = vs * os.unsqueeze(1)
-
-            verb_labels = torch.arange(hoi_scores.shape[1], device=self.correct_mat.device).view(1, -1).expand(
-                hoi_scores.shape[0], -1)
-            object_labels = ol.view(-1, 1).expand(-1, hoi_scores.shape[1])
-            masks = self.correct_mat[verb_labels.reshape(-1), object_labels.reshape(-1)].view(hoi_scores.shape)
-            hoi_scores *= masks
-
-            ids = torch.arange(b.shape[0])
-
-            hois = [{'subject_id': subject_id, 'object_id': object_id, 'category_id': category_id, 'score': score} for
-                    subject_id, object_id, category_id, score in zip(ids[:ids.shape[0] // 2].to('cpu').numpy(),
-                                                                     ids[ids.shape[0] // 2:].to('cpu').numpy(),
-                                                                     verb_labels.to('cpu').numpy(), hoi_scores.to('cpu').numpy())]
-
-            results.append({
-                'predictions': bboxes,
-                'hoi_prediction': hois
-            })
-
-        return results
+    # and sum (\Delta recall) * prec
+    ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
+    return ap
 
 
 def get_args_parser():
@@ -162,6 +417,8 @@ def get_args_parser():
                         help="Number of attention heads inside the transformer's attentions")
     parser.add_argument('--num_queries', default=100, type=int,
                         help="Number of query slots")
+    parser.add_argument('--num_verb_queries', default=100, type=int,
+                        help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
 
     # * HOI
@@ -175,13 +432,13 @@ def get_args_parser():
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--num_workers', default=2, type=int)
+    parser.add_argument('--model_name', default='baseline')
 
     return parser
 
 
 def main(args):
     print("git:\n  {}\n".format(utils.get_sha()))
-
     print(args)
 
     valid_obj_ids = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13,
@@ -211,10 +468,30 @@ def main(args):
     args.lr_backbone = 0
     args.masks = False
     backbone = build_backbone(args)
-    transformer = build_transformer(args)
-    model = DETRHOI(backbone, transformer, len(valid_obj_ids) + 1, len(verb_classes),
-                    args.num_queries)
-    post_processor = PostProcessHOI(args.num_queries, args.subject_category_id, dataset_val.correct_mat)
+    if args.model_name == "baseline":
+        from models.transformer import build_transformer
+        transformer = build_transformer(args)
+        from models.hoi import DETRHOI, PostProcessVCOCO
+        model = DETRHOI(backbone, transformer, len(valid_obj_ids) + 1, len(verb_classes),
+                        args.num_queries, args.num_verb_queries)
+    elif args.model_name == "hoi_ts_qpos_eobj_kl":
+        from models.transformer import build_hoi_transformer_ts_qpos_eobj_attention_map
+        transformer = build_hoi_transformer_ts_qpos_eobj_attention_map(args, begin_l=0,
+                                                                       num_obj_classes=args.num_obj_classes,
+                                                                       num_verb_classes=args.num_verb_classes)
+        from models.ts.hoi_share_qpos_eobj_cos_kl import DETRHOI, PostProcessVCOCO
+        model = DETRHOI(
+            backbone,
+            transformer,
+            num_obj_classes=args.num_obj_classes,
+            num_verb_classes=args.num_verb_classes,
+            num_queries=args.num_queries,
+            aux_loss=args.aux_loss
+        )
+    else:
+        print("add model name")
+        assert False
+    post_processor = PostProcessVCOCO(args.num_queries, args.subject_category_id, dataset_val.correct_mat)
     model.to(device)
     post_processor.to(device)
 
@@ -222,9 +499,17 @@ def main(args):
     model.load_state_dict(checkpoint['model'])
 
     detections = generate(model, post_processor, data_loader_val, device, verb_classes, args.missing_category_id)
-
-    with open(args.save_path, 'wb') as f:
+    import os
+    if not os.path.exists(args.save_path):
+        os.makedirs(args.save_path)
+    with open(os.path.join(args.save_path, "vcoco.pickle"), 'wb') as f:
         pickle.dump(detections, f, protocol=2)
+
+    vcocoeval = VCOCOeval("data/v-coco/annotations/vcoco_test.json",
+                          "data/v-coco/annotations/instances_vcoco_all_2014.json",
+                          "data/v-coco/annotations/vcoco_test.ids")
+    vcocoeval._do_eval(detections, ovr_thresh=0.5,
+                       out_name=os.path.join(args.save_path, "result.txt"))
 
 
 @torch.no_grad()

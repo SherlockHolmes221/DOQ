@@ -23,6 +23,7 @@ from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.hico_eval import HICOEvaluator
 from datasets.vcoco_eval import VCOCOEvaluator
+from datasets.hoia_eval import HOIAEvaluator
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
