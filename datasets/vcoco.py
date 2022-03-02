@@ -6,16 +6,16 @@ from pathlib import Path
 from PIL import Image
 import json
 import numpy as np
-
+import pickle
 import torch
 import torch.utils.data
 import torchvision
-
 import datasets.transforms as T
+from util.stitch_images import get_replace_image, get_sim_index
 
 class VCOCO(torch.utils.data.Dataset):
 
-    def __init__(self, img_set, img_folder, anno_file, transforms, num_queries):
+    def __init__(self, img_set, img_folder, anno_file, transforms, num_queries, dataset_file):
         self.img_set = img_set
         self.img_folder = img_folder
         with open(anno_file, 'r') as f:
@@ -23,6 +23,8 @@ class VCOCO(torch.utils.data.Dataset):
         self._transforms = transforms
 
         self.num_queries = num_queries
+
+        self.dataset_file = dataset_file
 
         self._valid_obj_ids = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13,
                                14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -34,13 +36,24 @@ class VCOCO(torch.utils.data.Dataset):
                                82, 84, 85, 86, 87, 88, 89, 90)
         self._valid_verb_ids = range(29)
 
+        self.nohoi_index = []
+        self.sim_index = []
+        self.obj_embed = np.load('data/vcoco_clip.npy')
+
     def __len__(self):
         return len(self.annotations)
 
     def __getitem__(self, idx):
-        img_anno = self.annotations[idx]
+        if np.random.random() < 0.15 and idx not in self.nohoi_index and self.img_set == 'train':
 
-        img = Image.open(self.img_folder / img_anno['file_name']).convert('RGB')
+            sim_im_num = 3
+            random_index = [idx] + get_sim_index(sim_im_num, self.nohoi_index, self.sim_index[idx])
+            img_anno, img = get_replace_image(random_index, self.annotations, self.img_folder, self.dataset_file)
+        else:
+            img_anno = self.annotations[idx]
+            img = Image.open(self.img_folder / img_anno['file_name']).convert('RGB')
+
+
         w, h = img.size
 
         if self.img_set == 'train' and len(img_anno['annotations']) > self.num_queries:
@@ -81,6 +94,9 @@ class VCOCO(torch.utils.data.Dataset):
 
             obj_labels, verb_labels, sub_boxes, obj_boxes = [], [], [], []
             sub_obj_pairs = []
+
+            gt_items = np.empty([0, 512 + 12])
+
             for hoi in img_anno['hoi_annotation']:
                 if hoi['subject_id'] not in kept_box_indices or \
                    (hoi['object_id'] != -1 and hoi['object_id'] not in kept_box_indices):
@@ -92,8 +108,10 @@ class VCOCO(torch.utils.data.Dataset):
                     sub_obj_pairs.append(sub_obj_pair)
                     if hoi['object_id'] == -1:
                         obj_labels.append(torch.tensor(len(self._valid_obj_ids)))
+                        obj_label = torch.tensor(len(self._valid_obj_ids))
                     else:
                         obj_labels.append(target['labels'][kept_box_indices.index(hoi['object_id'])])
+                        obj_label = target['labels'][kept_box_indices.index(hoi['object_id'])]
                     verb_label = [0 for _ in range(len(self._valid_verb_ids))]
                     verb_label[self._valid_verb_ids.index(hoi['category_id'])] = 1
                     sub_box = target['boxes'][kept_box_indices.index(hoi['subject_id'])]
@@ -104,16 +122,24 @@ class VCOCO(torch.utils.data.Dataset):
                     verb_labels.append(verb_label)
                     sub_boxes.append(sub_box)
                     obj_boxes.append(obj_box)
+
+                    c_dis = sub_box[0:2] - obj_box[0:2]
+                    wh_size = torch.stack([sub_box[2] * sub_box[3], obj_box[2] * obj_box[3]])
+                    gt_items_ = np.concatenate([self.obj_embed[obj_label], sub_box, obj_box, c_dis, wh_size])
+                    gt_items = np.concatenate([gt_items, gt_items_.reshape(1, 12 + 512)], axis=0)
+
             if len(sub_obj_pairs) == 0:
                 target['obj_labels'] = torch.zeros((0,), dtype=torch.int64)
                 target['verb_labels'] = torch.zeros((0, len(self._valid_verb_ids)), dtype=torch.float32)
                 target['sub_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
                 target['obj_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+                target['gt_items'] = torch.zeros((0, 12 + 512), dtype=torch.float32)
             else:
                 target['obj_labels'] = torch.stack(obj_labels)
                 target['verb_labels'] = torch.as_tensor(verb_labels, dtype=torch.float32)
                 target['sub_boxes'] = torch.stack(sub_boxes)
                 target['obj_boxes'] = torch.stack(obj_boxes)
+                target['gt_items'] = torch.as_tensor(gt_items, dtype=torch.float32)
         else:
             target['boxes'] = boxes
             target['labels'] = classes
@@ -132,6 +158,21 @@ class VCOCO(torch.utils.data.Dataset):
 
     def load_correct_mat(self, path):
         self.correct_mat = np.load(path)
+
+    def get_nohoi_index(self):
+        nohoi_index = []
+        for i in range(len(self.annotations)):
+            if(len(self.annotations[i]['hoi_annotation'])==0):
+                nohoi_index.append(i)
+            else:
+                obj_id = [v['object_id'] for v in self.annotations[i]['hoi_annotation']]
+                if(sum(obj_id)== -len(obj_id)):
+                    nohoi_index.append(i)
+        self.nohoi_index = nohoi_index
+
+    def get_sim_index(self):
+        self.sim_index = pickle.load(open('datasets/sim_index_vcoco.pickle', 'rb'))
+
 
 
 # Add color jitter to coco transforms
@@ -179,7 +220,10 @@ def build(image_set, args):
 
     img_folder, anno_file = PATHS[image_set]
     dataset = VCOCO(image_set, img_folder, anno_file, transforms=make_vcoco_transforms(image_set),
-                    num_queries=args.num_queries)
+                    num_queries=args.num_queries, dataset_file=args.dataset_file)
+    if image_set == 'train':
+        dataset.get_nohoi_index()
+        dataset.get_sim_index()
     if image_set == 'val':
         dataset.load_correct_mat(CORRECT_MAT_PATH)
     return dataset
