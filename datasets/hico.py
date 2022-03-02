@@ -59,7 +59,7 @@ class HICODetection(torch.utils.data.Dataset):
         return len(self.ids)
 
     def __getitem__(self, idx):
-        if np.random.random() < 2 and self.img_set == 'train' and self.ids[idx] not in self.nohoi_index:
+        if np.random.random() < 0.25 and self.img_set == 'train' and self.ids[idx] not in self.nohoi_index:
             sim_in_num = 3
             random_index = [self.ids[idx]] + get_sim_index(sim_in_num, self.nohoi_index, self.sim_index[self.ids[idx]])
             img_anno, img = get_replace_image(random_index, self.annotations, self.img_folder, "hoia")

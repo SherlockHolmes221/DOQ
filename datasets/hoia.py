@@ -5,7 +5,6 @@
 """
 HICO detection dataset.
 """
-import pickle
 from pathlib import Path
 from PIL import Image
 import json
@@ -14,14 +13,14 @@ import numpy as np
 
 import torch
 import torch.utils.data
-
+import pickle
 import datasets.transforms as T
 from datasets.stitch_images import get_replace_image, get_sim_index
 
 
 class HOIADetection(torch.utils.data.Dataset):
 
-    def __init__(self, img_set, img_folder, anno_file, transforms, num_queries, hard_negative=False):
+    def __init__(self, img_set, img_folder, anno_file, transforms, num_queries):
         self.img_set = img_set
         self.img_folder = img_folder
         with open(anno_file, 'r') as f:
@@ -54,11 +53,15 @@ class HOIADetection(torch.utils.data.Dataset):
                     continue
                 self.ids.append(idx)
 
+        self.obj_word = np.load("data/hoia/annotations/obj_clipvec.npy")
+        self._valid_hoi_ids = list(range(0, 18))
+        self.verb_index_obj_index_hoi_index = {}
+
     def __len__(self):
         return len(self.ids)
 
     def __getitem__(self, idx):
-        if np.random.random() < 2 and self.img_set == 'train' and self.ids[idx] not in self.nohoi_index:
+        if np.random.random() < 0.25 and self.img_set == 'train' and self.ids[idx] not in self.nohoi_index:
             sim_in_num = 3
             random_index = [self.ids[idx]] + get_sim_index(sim_in_num, self.nohoi_index, self.sim_index[self.ids[idx]])
             img_anno, img = get_replace_image(random_index, self.annotations, self.img_folder, "hoia")
@@ -66,8 +69,6 @@ class HOIADetection(torch.utils.data.Dataset):
             img_anno = self.annotations[self.ids[idx]]
             img = Image.open(self.img_folder / img_anno['file_name']).convert('RGB')
 
-        # img_anno = self.annotations[self.ids[idx]]
-        # img = Image.open(self.img_folder / img_anno['file_name']).convert('RGB')
         w, h = img.size
 
         if self.img_set == 'train' and len(img_anno['annotations']) > self.num_queries:
@@ -112,6 +113,8 @@ class HOIADetection(torch.utils.data.Dataset):
             action_image_labels = torch.zeros([1, 10], dtype=target["labels"].dtype)
             obj_image_labels = torch.zeros([1, 11], dtype=target["labels"].dtype)
 
+            gt_items = np.empty([0, 524])
+
             for hoi in img_anno['hoi_annotation']:
                 if hoi['subject_id'] not in kept_box_indices or hoi['object_id'] not in kept_box_indices:
                     continue
@@ -135,6 +138,11 @@ class HOIADetection(torch.utils.data.Dataset):
 
                     sub_boxes.append(sub_box)
                     obj_boxes.append(obj_box)
+                    c_dis = sub_box[0:2] - obj_box[0:2]
+                    wh_size = torch.stack([sub_box[2] * sub_box[3], obj_box[2] * obj_box[3]])
+                    gt_items_ = np.concatenate(
+                        [self.obj_word[obj_label], sub_box, obj_box, c_dis, wh_size])
+                    gt_items = np.concatenate([gt_items, gt_items_.reshape(1, 524)], axis=0)
 
             if len(sub_obj_pairs) == 0:
                 target['obj_labels'] = torch.zeros((0,), dtype=torch.int64)
@@ -143,6 +151,7 @@ class HOIADetection(torch.utils.data.Dataset):
                 target['obj_image_labels'] = torch.zeros((1, 80), dtype=torch.float32)
                 target['sub_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
                 target['obj_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+                target['gt_items'] = torch.zeros((0, 524), dtype=torch.float32)
             else:
                 target['obj_labels'] = torch.stack(obj_labels)
                 target['verb_labels'] = torch.as_tensor(verb_labels, dtype=torch.float32)
@@ -150,6 +159,7 @@ class HOIADetection(torch.utils.data.Dataset):
                 target['action_image_labels'] = torch.as_tensor(action_image_labels, dtype=torch.float32)
                 target['sub_boxes'] = torch.stack(sub_boxes)
                 target['obj_boxes'] = torch.stack(obj_boxes)
+                target['gt_items'] = torch.as_tensor(gt_items, dtype=torch.float32)
         else:
             target['boxes'] = boxes
             target['labels'] = classes
@@ -196,19 +206,21 @@ class HOIADetection(torch.utils.data.Dataset):
     def get_nohoid_index(self):
         nohoi_index = []
         for idx, img_anno in enumerate(self.annotations):
-            if len(img_anno['hoi_annotation']) == 0 or len(img_anno['annotations']) > 100:
+            if len(img_anno['hoi_annotation']) == 0:
                 nohoi_index.append(idx)
                 continue
             for hoi in img_anno['hoi_annotation']:
-                if hoi['subject_id'] >= len(img_anno['annotations']) or \
-                        hoi['object_id'] >= len(img_anno['annotations']):
+                if hoi["category_id"] == 0:
+                    nohoi_index.append(idx)
+                    break
+                if hoi['subject_id'] >= len(img_anno['annotations']) or hoi['object_id'] >= len(
+                        img_anno['annotations']):
                     nohoi_index.append(idx)
                     break
         self.nohoi_index = nohoi_index
 
     def get_sim_index(self):
-        self.sim_index = pickle.load(open('data/hico_20160224_det/'
-                                          'annotations/sim_index_hoia.pickle', 'rb'))
+        self.sim_index = pickle.load(open('data/hoia/annotations/sim_index_hoia.pickle', 'rb'))
 
 
 def make_hico_transforms(image_set):
@@ -247,14 +259,14 @@ def build(image_set, args):
     root = Path(args.hoi_path)
     assert root.exists(), f'provided HOI path {root} does not exist'
     PATHS = {
-        'train': (root / 'images' / 'trainval2019', root / 'annotations' / 'train_2019.json'),
-        'val': (root / 'images' / 'test2019', root / 'annotations' / 'test_2019.json')
+        'train': (root / 'images' / 'trainval', root / 'annotations' / 'train_2019.json'),
+        'val': (root / 'images' / 'test', root / 'annotations' / 'test_2019.json')
     }
     CORRECT_MAT_PATH = root / 'annotations' / 'corre_hoia.npy'
 
     img_folder, anno_file = PATHS[image_set]
     dataset = HOIADetection(image_set, img_folder, anno_file, transforms=make_hico_transforms(image_set),
-                            num_queries=args.num_queries, hard_negative=args.hard_negative)
+                            num_queries=args.num_queries)
     if image_set == 'train':
         dataset.get_nohoid_index()
         dataset.get_sim_index()

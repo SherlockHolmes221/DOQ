@@ -1,7 +1,7 @@
 # Distillation Using Oracle Queries for Transformer-based Human-Object Interaction Detection
 Xian Qu,
 Changxing Ding,
-xingao li,
+Xingao Li,
 Xubin Zhong,
 Dacheng Tao
 
@@ -23,17 +23,18 @@ The dataset structure is:
 ```
 qpic
  |─ data
- �?  └─ hico_20160224_det
+ |   └─ hico_20160224_det
  |       |─ annotations
  |       |   |─ trainval_hico.json
  |       |   |─ test_hico.json
  |       |   |─ sim_index_hico.pickle
+ |       |   |─ coco_clipvec.npy
  |       |   └─ corre_hico.npy
  |       |─ images
  |       |   |─ test2015
  |       |   └─ train2015
  
-  �?  └─ v-coco
+ |   └─ v-coco
  |       |─ annotations
  |       |   |─ trainval_vcoco.json
  |       |   |─ test_vcoco.json
@@ -46,18 +47,19 @@ qpic
  |       |   |─ train2014
  |       |   └─ val2014
  
-  �?  └─ hoia
+ |   └─ hoia
  |       |─ annotations
  |       |   |─ test_2019.json
  |       |   |─ train_2019.json
  |       |   |─ sim_index_hoia.pickle
  |       |   └─ corre_hoia.npy
  |       |─ images
- |       |   |─ test2019
- |       |   └─ trainval2019
+ |       |   |─ test
+ |       |   └─ trainval
 ```
 
 The annotations file can be downloaded [here]()
+The pre-trained weights can be downloaded [here]()
 
 Please download the images at the official website for the datasets above.
 
@@ -219,7 +221,7 @@ HOI-A.
 Please consider citing our paper if it helps your research.
 ```
 @inproceedings{distillation_cvpr2022,
-author = {Xian Qu,Changxing Ding,xingao li,Xubin Zhong,Dacheng Tao},
+author = {Xian Qu,Changxing Ding,Xingao Li,Xubin Zhong,Dacheng Tao},
 title = {Distillation Using Oracle Queries for Transformer-based Human-Object Interaction Detection},
 booktitle={CVPR},
 year = {2022},

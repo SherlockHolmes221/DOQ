@@ -1,9 +1,8 @@
 import numpy as np
-import util.io as io
 
 
 class HOIAEvaluator():
-    def __init__(self, preds, gts, correct_mat,write_file_name=None):
+    def __init__(self, preds, gts, correct_mat):
         self.overlap_iou = 0.5
         self.max_hois = 100
         # self.verb_name_dict = {1: 'smoke', 2: 'call', 3: 'play(cellphone)', 4: 'eat', 5: 'drink',
@@ -74,10 +73,6 @@ class HOIAEvaluator():
                 'predictions': bboxes,
                 'hoi_prediction': hois
             })
-
-        if write_file_name:
-            io.dump_json_object(self.preds, write_file_name)
-            print(len(self.preds), "finish write json file")
 
     def evaluate(self):
         for pred_i, gt_i in zip(self.preds, self.gts):
