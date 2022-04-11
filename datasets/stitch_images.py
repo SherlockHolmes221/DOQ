@@ -464,23 +464,3 @@ def get_replace_image(random_index, annotations, images_folder, dataset_file):
 
 
 
-if __name__ == '__main__':
-    annotations_path = os.path.join('../data/hico_20160224_det', 'annotations', 'trainval_hico.json')
-    images_folder = os.path.join('../data/hico_20160224_det', 'images', 'train2015')
-
-    annotations = json.load(open(annotations_path))
-
-    sim_index = pickle.load(open('../datasets/sim_index_hico.pickle', 'rb'))
-    nohoi_index = []
-    for idx, img_anno in enumerate(annotations):
-        for hoi in img_anno['hoi_annotation']:
-            if hoi['subject_id'] >= len(img_anno['annotations']) or hoi['object_id'] >= len(
-                    img_anno['annotations']) or hoi['subject_id'] >= 100 or hoi['object_id'] >= 100:
-                nohoi_index.append(idx)
-                break
-
-    idx = np.random.randint(0, len(annotations))
-    random_index = [idx] + get_sim_index(3, nohoi_index=nohoi_index, sim_index=sim_index[idx])
-    anno, img = get_replace_image(random_index, annotations, images_folder, dataset_file='hico')
-
-
