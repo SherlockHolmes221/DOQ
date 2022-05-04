@@ -66,9 +66,6 @@ trained parameters can be downloaded [here](https://drive.google.com/drive/folde
 
 Please download the images at the official website for the datasets above.
 
-
-### Trained parameters
-
 ## Training
 After the preparation, you can start the training with the following command.
 
