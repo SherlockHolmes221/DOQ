@@ -5,7 +5,7 @@ Xingao Li,
 Xubin Zhong,
 Dacheng Tao
 
-The paper is accepted to CVPR2022.
+The [paper](https://openaccess.thecvf.com/content/CVPR2022/papers/Qu_Distillation_Using_Oracle_Queries_for_Transformer-Based_Human-Object_Interaction_Detection_CVPR_2022_paper.pdf) is accepted to CVPR2022.
 
 <div align="center">
   <img src=".github/overview_doq.png" width="900px" />
@@ -219,11 +219,13 @@ HOI-A.
 ## Citation
 Please consider citing our paper if it helps your research.
 ```
-@inproceedings{distillation_cvpr2022,
-author = {Xian Qu,Changxing Ding,Xingao Li,Xubin Zhong,Dacheng Tao},
-title = {Distillation Using Oracle Queries for Transformer-based Human-Object Interaction Detection},
-booktitle={CVPR},
-year = {2022},
+@InProceedings{Qu_2022_CVPR,
+    author    = {Qu, Xian and Ding, Changxing and Li, Xingao and Zhong, Xubin and Tao, Dacheng},
+    title     = {Distillation Using Oracle Queries for Transformer-Based Human-Object Interaction Detection},
+    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+    month     = {June},
+    year      = {2022},
+    pages     = {19558-19567}
 }
 ```
 
