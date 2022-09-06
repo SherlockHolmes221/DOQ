@@ -191,7 +191,8 @@ For the official evaluation of V-COCO, a pickle file of detection results have t
 python generate_vcoco_official.py \
 --param_path outputs/vcoco/ts_model/checkpoint.pth \
 --save_path vcoco.pickle \
---hoi_path data/v-coco
+--hoi_path data/v-coco \
+--model_name hoi_ts_qpos_eobj_kl
 ```
 
 
