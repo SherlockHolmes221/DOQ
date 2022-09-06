@@ -433,6 +433,7 @@ def get_args_parser():
                         help='device to use for training / testing')
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--model_name', default='baseline')
+    parser.add_argument('--dataset_file', default='vcoco')
 
     return parser
 
