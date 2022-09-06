@@ -454,7 +454,7 @@ def get_replace_image(random_index, annotations, images_folder, dataset_file):
     rescale_annos, rescale_images = random_rescale(len(random_index), flip_annos, flip_images)
     anno, image = get_stitch_images(rescale_annos, rescale_images, images_folder)
 
-    if dataset_file == 'vcoco':
+    if dataset_file in ['vcoco', 'hoia']:
         anno = convanno2vcoco(anno)
     elif dataset_file == 'hico':
         anno = convanno2hico(anno)
