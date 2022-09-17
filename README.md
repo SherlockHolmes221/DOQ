@@ -10,7 +10,6 @@ The [paper](https://openaccess.thecvf.com/content/CVPR2022/papers/Qu_Distillatio
 <div align="center">
   <img src=".github/overview_doq.png" width="900px" />
 </div>
-
 ## Preparation
 
 ### Environment
@@ -87,7 +86,9 @@ main.py \
 --bbox_loss_coef 2.5 \
 --giou_loss_coef 1 \
 --output_dir outputs/hico/ts_model/ \
---model_name hoi_ts 
+--model_name hoi_ts \
+--epochs 80 \
+--lr_drop 60
 ```
 
 For the V-COCO training.
@@ -108,7 +109,9 @@ main.py \
 --bbox_loss_coef 2.5 \
 --giou_loss_coef 1 \
 --output_dir outputs/vcoco/ts_model/ \
---model_name hoi_ts 
+--model_name hoi_ts \
+--epochs 80 \
+--lr_drop 60
 ```
 
 For the HOI-A training.
@@ -129,7 +132,9 @@ main.py \
 --bbox_loss_coef 2.5 \
 --giou_loss_coef 1 \
 --output_dir outputs/hoia/ts_model/ \
---model_name hoi_ts 
+--model_name hoi_ts \
+--epochs 80 \
+--lr_drop 60
 ```
 
 ## Evaluation
